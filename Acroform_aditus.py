@@ -3,7 +3,6 @@
 """
 REST API para agregar campos de imagen a archivos PDF
 Usando FastAPI
-Autor: Asistente IA
 Fecha: 2025
 """
 
@@ -417,3 +416,4 @@ if __name__ == "__main__":
         port=8000,
         reload=True
     )
+
