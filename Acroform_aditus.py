@@ -1,70 +1,96 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Script para agregar campos de IMAGEN a archivos PDF existentes
+REST API para agregar campos de imagen a archivos PDF
+Usando FastAPI
+Autor: Asistente IA
 Fecha: 2025
 """
 
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional, List
 import os
-import sys
+import tempfile
+import shutil
 from pathlib import Path
+import zipfile
+import io
+import uuid
+from datetime import datetime
+
+# Importar las clases del código original
 from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfbase import pdfform
 from reportlab.lib.colors import black, white
 import PyPDF2
 from PyPDF2 import PdfWriter, PdfReader
-from reportlab.lib.units import inch
-import tempfile
-import io
 
-class PDFImageFieldAdder:
-    def __init__(self, field_name="firma_empleado", x_pos=-27, y_pos=16, width=90, height=23):
-        """
-        Inicializa el agregador de campos de imagen
-        
-        Args:
-            field_name (str): Nombre del campo de imagen
-            x_pos (int): Posición X del campo
-            y_pos (int): Posición Y del campo
-            width (int): Ancho del campo
-            height (int): Alto del campo
-        """
-        self.field_name = field_name
-        self.x_pos = x_pos
-        self.y_pos = y_pos
-        self.width = width
-        self.height = height
+# Inicializar FastAPI
+app = FastAPI(
+    title="PDF Image Field API",
+    description="API REST para agregar campos de imagen a archivos PDF",
+    version="1.0.0"
+)
+
+# Configurar CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # En producción, especifica dominios específicos
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Modelos Pydantic para requests/responses
+class ImageFieldConfig(BaseModel):
+    field_name: str = "firma_empleado"
+    x_pos: int = -27
+    y_pos: int = 16
+    width: int = 90
+    height: int = 23
+
+class ProcessResponse(BaseModel):
+    success: bool
+    message: str
+    processed_files: int
+    successful: int
+    failed: int
+    download_url: Optional[str] = None
+    file_id: Optional[str] = None
+
+class StatusResponse(BaseModel):
+    status: str
+    message: str
+    timestamp: str
+
+# Directorio temporal para archivos
+TEMP_DIR = Path("temp_files")
+TEMP_DIR.mkdir(exist_ok=True)
+
+# Clase principal (adaptada del código original)
+class PDFImageFieldProcessor:
+    def __init__(self, config: ImageFieldConfig):
+        self.field_name = config.field_name
+        self.x_pos = config.x_pos
+        self.y_pos = config.y_pos
+        self.width = config.width
+        self.height = config.height
     
     def create_image_field_overlay(self, page_width=612, page_height=792):
-        """
-        Crea un overlay PDF con el campo de imagen
-        
-        Args:
-            page_width (int): Ancho de la página
-            page_height (int): Alto de la página
-            
-        Returns:
-            io.BytesIO: Buffer con el PDF overlay
-        """
-        # Crear un buffer en memoria para el overlay
+        """Crea overlay con campo de imagen"""
         buffer = io.BytesIO()
-        
-        # Crear canvas de reportlab
         c = canvas.Canvas(buffer, pagesize=(page_width, page_height))
         
-        # Ajustar posición según el sistema de coordenadas de PDF
-        # PDF usa coordenadas desde abajo-izquierda
+        # Ajustar posición
         adjusted_x = self.x_pos if self.x_pos >= 0 else page_width + self.x_pos
         adjusted_y = self.y_pos if self.y_pos >= 0 else page_height + self.y_pos
         
-        # Crear campo de imagen usando un enfoque manual más específico
-        # Los campos de imagen en PDF requieren un enfoque particular
-        
-        # Método 1: Campo de botón que puede contener imágenes
+        # Crear campo de imagen
         c.acroForm.button(
             name=self.field_name,
-            tooltip=f'Campo de imagen: {self.field_name} - Haga clic para insertar imagen',
+            tooltip=f'Campo de imagen: {self.field_name}',
             x=adjusted_x,
             y=adjusted_y,
             width=self.width,
@@ -76,260 +102,318 @@ class PDFImageFieldAdder:
             forceBorder=True
         )
         
-        # Agregar texto indicativo (opcional)
+        # Texto indicativo
         c.setFont("Helvetica", 8)
         c.setFillColor(black)
         text_x = adjusted_x + 5
         text_y = adjusted_y + (self.height/2) - 4
         c.drawString(text_x, text_y, "Imagen")
         
-        # Finalizar el canvas
         c.save()
-        
-        # Resetear el buffer para lectura
         buffer.seek(0)
         return buffer
     
-    def create_image_field_manual(self, page_width=612, page_height=792):
-        """
-        Crear campo de imagen usando PyPDF2 directamente
-        Esto crea un campo más compatible para insertar imágenes
-        """
-        from PyPDF2.generic import DictionaryObject, ArrayObject, TextStringObject, NameObject, NumberObject
-        
-        # Ajustar coordenadas
-        adjusted_x = self.x_pos if self.x_pos >= 0 else page_width + self.x_pos
-        adjusted_y = self.y_pos if self.y_pos >= 0 else page_height + self.y_pos
-        
-        # Crear el diccionario del campo de imagen
-        field_dict = DictionaryObject({
-            NameObject("/Type"): NameObject("/Annot"),
-            NameObject("/Subtype"): NameObject("/Widget"),
-            NameObject("/FT"): NameObject("/Btn"),  # Button field type para imágenes
-            NameObject("/Ff"): NumberObject(65536),  # Pushbutton flag para imágenes
-            NameObject("/T"): TextStringObject(self.field_name),
-            NameObject("/Rect"): ArrayObject([
-                NumberObject(adjusted_x),
-                NumberObject(adjusted_y),
-                NumberObject(adjusted_x + self.width),
-                NumberObject(adjusted_y + self.height)
-            ]),
-            NameObject("/P"): None,  # Se asignará después
-            NameObject("/BS"): DictionaryObject({
-                NameObject("/W"): NumberObject(1),
-                NameObject("/S"): NameObject("/I")
-            }),
-            NameObject("/MK"): DictionaryObject({
-                NameObject("/BG"): ArrayObject([NumberObject(1), NumberObject(1), NumberObject(1)]),  # Fondo blanco
-                NameObject("/BC"): ArrayObject([NumberObject(0), NumberObject(0), NumberObject(0)])   # Borde negro
-            })
-        })
-        
-        return field_dict
-    
-    def add_image_field_to_pdf(self, input_path, output_path=None):
-        """
-        Agrega campo de imagen a un archivo PDF específico
-        
-        Args:
-            input_path (str): Ruta del archivo PDF de entrada
-            output_path (str): Ruta del archivo PDF de salida (opcional)
-            
-        Returns:
-            bool: True si fue exitoso, False en caso contrario
-        """
+    def process_pdf(self, input_path: str, output_path: str) -> bool:
+        """Procesa un PDF individual"""
         try:
-            # Definir ruta de salida si no se proporciona
-            if output_path is None:
-                path_obj = Path(input_path)
-                output_path = path_obj.parent / f"{path_obj.stem}_con_imagen{path_obj.suffix}"
-            
-            # Leer el PDF original
             with open(input_path, 'rb') as file:
                 reader = PdfReader(file)
                 writer = PdfWriter()
                 
-                # Procesar cada página
                 for page_num, page in enumerate(reader.pages):
-                    # Obtener dimensiones de la página
                     page_rect = page.mediabox
                     page_width = float(page_rect.width)
                     page_height = float(page_rect.height)
                     
-                    # Agregar campo de imagen solo en la primera página
-                    if page_num == 0:
-                        # Método usando reportlab para mayor compatibilidad
+                    if page_num == 0:  # Solo primera página
                         overlay_buffer = self.create_image_field_overlay(page_width, page_height)
                         overlay_reader = PdfReader(overlay_buffer)
                         overlay_page = overlay_reader.pages[0]
-                        
-                        # Combinar la página original con el overlay
                         page.merge_page(overlay_page)
-                        
-                        # Alternativa: Agregar campo manualmente usando PyPDF2
-                        # (comentado porque el método reportlab es más estable)
-                        """
-                        field_dict = self.create_image_field_manual(page_width, page_height)
-                        field_dict[NameObject("/P")] = page.indirect_reference
-                        
-                        if "/Annots" not in page:
-                            page[NameObject("/Annots")] = ArrayObject()
-                        
-                        page[NameObject("/Annots")].append(field_dict)
-                        """
                     
-                    # Agregar página al writer
                     writer.add_page(page)
                 
-                # Configurar el formulario para campos de imagen
-                if hasattr(writer, '_root_object') and "/AcroForm" not in writer._root_object:
-                    from PyPDF2.generic import DictionaryObject, NameObject, NumberObject
-                    writer._root_object[NameObject("/AcroForm")] = DictionaryObject({
-                        NameObject("/Fields"): ArrayObject(),
-                        NameObject("/DR"): DictionaryObject(),
-                        NameObject("/DA"): TextStringObject(""),
-                        NameObject("/NeedAppearances"): NameObject("/true")
-                    })
-                
-                # Guardar el archivo modificado
                 with open(output_path, 'wb') as output_file:
                     writer.write(output_file)
             
-            print(f"✓ Campo de imagen agregado exitosamente a: {output_path}")
             return True
-            
         except Exception as e:
-            print(f"✗ Error procesando {input_path}: {str(e)}")
+            print(f"Error procesando PDF: {e}")
             return False
+
+# Endpoints de la API
+
+@app.get("/", response_model=StatusResponse)
+async def root():
+    """Endpoint de estado de la API"""
+    return StatusResponse(
+        status="active",
+        message="PDF Image Field API está funcionando correctamente",
+        timestamp=datetime.now().isoformat()
+    )
+
+@app.get("/health", response_model=StatusResponse)
+async def health_check():
+    """Health check endpoint"""
+    return StatusResponse(
+        status="healthy",
+        message="API operativa",
+        timestamp=datetime.now().isoformat()
+    )
+
+@app.post("/process-single-pdf", response_model=ProcessResponse)
+async def process_single_pdf(
+    file: UploadFile = File(...),
+    field_name: str = Form("firma_empleado"),
+    x_pos: int = Form(-27),
+    y_pos: int = Form(16),
+    width: int = Form(90),
+    height: int = Form(23)
+):
+    """
+    Procesa un único archivo PDF y agrega campo de imagen
+    """
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="El archivo debe ser un PDF")
     
-    def process_multiple_pdfs(self, input_directory, output_directory=None, file_pattern="*.pdf"):
-        """
-        Procesa múltiples archivos PDF en un directorio
+    # Crear configuración
+    config = ImageFieldConfig(
+        field_name=field_name,
+        x_pos=x_pos,
+        y_pos=y_pos,
+        width=width,
+        height=height
+    )
+    
+    # Generar ID único para el archivo
+    file_id = str(uuid.uuid4())
+    
+    try:
+        # Guardar archivo temporal
+        input_path = TEMP_DIR / f"{file_id}_input.pdf"
+        output_path = TEMP_DIR / f"{file_id}_output.pdf"
         
-        Args:
-            input_directory (str): Directorio con archivos PDF de entrada
-            output_directory (str): Directorio para archivos de salida (opcional)
-            file_pattern (str): Patrón de archivos a procesar
-            
-        Returns:
-            dict: Estadísticas del procesamiento
-        """
-        input_path = Path(input_directory)
+        with open(input_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
         
-        if not input_path.exists():
-            print(f"✗ El directorio {input_directory} no existe")
-            return {"procesados": 0, "exitosos": 0, "fallidos": 0}
+        # Procesar PDF
+        processor = PDFImageFieldProcessor(config)
+        success = processor.process_pdf(str(input_path), str(output_path))
         
-        # Definir directorio de salida
-        if output_directory is None:
-            output_path = input_path / "pdfs_con_imagen"
+        if success:
+            return ProcessResponse(
+                success=True,
+                message="PDF procesado exitosamente",
+                processed_files=1,
+                successful=1,
+                failed=0,
+                download_url=f"/download/{file_id}",
+                file_id=file_id
+            )
         else:
-            output_path = Path(output_directory)
-        
-        # Crear directorio de salida si no existe
-        output_path.mkdir(parents=True, exist_ok=True)
-        
-        # Encontrar archivos PDF
-        pdf_files = list(input_path.glob(file_pattern))
-        
-        if not pdf_files:
-            print(f"✗ No se encontraron archivos PDF en {input_directory}")
-            return {"procesados": 0, "exitosos": 0, "fallidos": 0}
-        
-        print(f"📁 Encontrados {len(pdf_files)} archivos PDF para procesar")
-        print(f"📂 Directorio de salida: {output_path}")
-        print(f"🖼️  Agregando campos de IMAGEN (no texto)")
-        print("-" * 50)
-        
-        # Contadores
-        exitosos = 0
-        fallidos = 0
-        
-        # Procesar cada archivo
-        for pdf_file in pdf_files:
-            output_file = output_path / f"{pdf_file.stem}_con_imagen{pdf_file.suffix}"
+            raise HTTPException(status_code=500, detail="Error procesando el PDF")
             
-            if self.add_image_field_to_pdf(str(pdf_file), str(output_file)):
-                exitosos += 1
-            else:
-                fallidos += 1
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+    
+    finally:
+        # Limpiar archivo de entrada
+        if input_path.exists():
+            input_path.unlink()
+
+@app.post("/process-multiple-pdfs", response_model=ProcessResponse)
+async def process_multiple_pdfs(
+    files: List[UploadFile] = File(...),
+    field_name: str = Form("firma_empleado"),
+    x_pos: int = Form(-27),
+    y_pos: int = Form(16),
+    width: int = Form(90),
+    height: int = Form(23)
+):
+    """
+    Procesa múltiples archivos PDF y los devuelve en un ZIP
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="No se proporcionaron archivos")
+    
+    # Verificar que todos sean PDFs
+    for file in files:
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(status_code=400, detail=f"Todos los archivos deben ser PDFs: {file.filename}")
+    
+    # Crear configuración
+    config = ImageFieldConfig(
+        field_name=field_name,
+        x_pos=x_pos,
+        y_pos=y_pos,
+        width=width,
+        height=height
+    )
+    
+    # Generar ID único para el batch
+    batch_id = str(uuid.uuid4())
+    batch_dir = TEMP_DIR / f"batch_{batch_id}"
+    batch_dir.mkdir()
+    
+    processor = PDFImageFieldProcessor(config)
+    successful = 0
+    failed = 0
+    
+    try:
+        # Procesar cada archivo
+        for file in files:
+            try:
+                input_path = batch_dir / f"input_{file.filename}"
+                output_path = batch_dir / f"processed_{file.filename}"
+                
+                # Guardar archivo temporal
+                with open(input_path, "wb") as buffer:
+                    shutil.copyfileobj(file.file, buffer)
+                
+                # Procesar
+                if processor.process_pdf(str(input_path), str(output_path)):
+                    successful += 1
+                else:
+                    failed += 1
+                
+                # Limpiar entrada
+                input_path.unlink()
+                
+            except Exception as e:
+                print(f"Error procesando {file.filename}: {e}")
+                failed += 1
         
-        # Mostrar estadísticas
-        print("-" * 50)
-        print(f"📊 Procesamiento completado:")
-        print(f"   • Archivos procesados: {len(pdf_files)}")
-        print(f"   • Exitosos: {exitosos}")
-        print(f"   • Fallidos: {fallidos}")
-        print(f"   • Tipo de campo: IMAGEN (permite cargar imágenes)")
-        
-        return {
-            "procesados": len(pdf_files),
-            "exitosos": exitosos,
-            "fallidos": fallidos
+        if successful > 0:
+            # Crear ZIP con archivos procesados
+            zip_path = TEMP_DIR / f"processed_pdfs_{batch_id}.zip"
+            
+            with zipfile.ZipFile(zip_path, 'w') as zip_file:
+                for processed_file in batch_dir.glob("processed_*"):
+                    original_name = processed_file.name.replace("processed_", "")
+                    zip_file.write(processed_file, original_name)
+            
+            return ProcessResponse(
+                success=True,
+                message=f"Procesados {successful} de {len(files)} archivos",
+                processed_files=len(files),
+                successful=successful,
+                failed=failed,
+                download_url=f"/download-zip/{batch_id}",
+                file_id=batch_id
+            )
+        else:
+            raise HTTPException(status_code=500, detail="No se pudo procesar ningún archivo")
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+    
+    finally:
+        # Limpiar directorio batch (excepto archivos finales)
+        for file in batch_dir.glob("input_*"):
+            if file.exists():
+                file.unlink()
+
+@app.get("/download/{file_id}")
+async def download_processed_pdf(file_id: str):
+    """
+    Descarga un PDF procesado individual
+    """
+    file_path = TEMP_DIR / f"{file_id}_output.pdf"
+    
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+    
+    return FileResponse(
+        path=file_path,
+        filename=f"pdf_con_imagen_{file_id}.pdf",
+        media_type="application/pdf"
+    )
+
+@app.get("/download-zip/{batch_id}")
+async def download_processed_zip(batch_id: str):
+    """
+    Descarga ZIP con múltiples PDFs procesados
+    """
+    zip_path = TEMP_DIR / f"processed_pdfs_{batch_id}.zip"
+    
+    if not zip_path.exists():
+        raise HTTPException(status_code=404, detail="Archivo ZIP no encontrado")
+    
+    return FileResponse(
+        path=zip_path,
+        filename=f"pdfs_con_imagen_{batch_id}.zip",
+        media_type="application/zip"
+    )
+
+@app.delete("/cleanup/{file_id}")
+async def cleanup_files(file_id: str):
+    """
+    Limpia archivos temporales de un procesamiento específico
+    """
+    files_to_clean = [
+        TEMP_DIR / f"{file_id}_output.pdf",
+        TEMP_DIR / f"processed_pdfs_{file_id}.zip",
+        TEMP_DIR / f"batch_{file_id}"
+    ]
+    
+    cleaned = 0
+    for file_path in files_to_clean:
+        try:
+            if file_path.is_file():
+                file_path.unlink()
+                cleaned += 1
+            elif file_path.is_dir():
+                shutil.rmtree(file_path)
+                cleaned += 1
+        except Exception:
+            pass
+    
+    return {"message": f"Limpiados {cleaned} elementos", "file_id": file_id}
+
+@app.get("/config/default")
+async def get_default_config():
+    """
+    Obtiene la configuración por defecto para campos de imagen
+    """
+    return {
+        "field_name": "firma_empleado",
+        "x_pos": -27,
+        "y_pos": 16,
+        "width": 90,
+        "height": 23,
+        "description": {
+            "field_name": "Nombre del campo de imagen",
+            "x_pos": "Posición X (-27 = 27 píxeles desde borde derecho)",
+            "y_pos": "Posición Y desde abajo",
+            "width": "Ancho del campo en píxeles",
+            "height": "Alto del campo en píxeles"
         }
+    }
 
-def main():
-    """Función principal del script"""
-    print("🖼️  Iniciando procesador de campos de IMAGEN PDF")
-    print("=" * 50)
-    
-    # Crear instancia del procesador con los parámetros especificados
-    processor = PDFImageFieldAdder(
-        field_name="firma_empleado",
-        x_pos=-27,  # 27 píxeles desde el borde derecho
-        y_pos=16,   # 16 píxeles desde abajo
-        width=90,   # 90 píxeles de ancho
-        height=23   # 23 píxeles de alto
-    )
-    
-    # Ejemplo de uso: procesar un directorio
-    input_dir = input("📁 Ingresa la ruta del directorio con archivos PDF: ").strip()
-    
-    if not input_dir:
-        # Usar directorio actual si no se proporciona ruta
-        input_dir = "."
-        print("📂 Usando directorio actual")
-    
-    # Procesar archivos
-    stats = processor.process_multiple_pdfs(input_dir)
-    
-    if stats["exitosos"] > 0:
-        print("✅ Procesamiento completado exitosamente")
-        print("🖼️  Los campos creados permiten insertar/cargar IMÁGENES")
-    else:
-        print("❌ No se procesaron archivos exitosamente")
-
-# Función de utilidad para uso individual
-def add_image_field_to_single_pdf(input_file, output_file=None):
-    """
-    Función de conveniencia para agregar campo de imagen a un solo PDF
-    
-    Args:
-        input_file (str): Ruta del archivo PDF de entrada
-        output_file (str): Ruta del archivo PDF de salida (opcional)
-    
-    Returns:
-        bool: True si fue exitoso
-    """
-    processor = PDFImageFieldAdder(
-        field_name="firma_empleado",
-        x_pos=-27,
-        y_pos=16,
-        width=90,
-        height=23
-    )
-    
-    return processor.add_image_field_to_pdf(input_file, output_file)
+# Cleanup automático al iniciar
+@app.on_event("startup")
+async def startup_event():
+    """Limpiar archivos temporales al iniciar"""
+    if TEMP_DIR.exists():
+        for file in TEMP_DIR.glob("*"):
+            try:
+                if file.is_file():
+                    file.unlink()
+                elif file.is_dir():
+                    shutil.rmtree(file)
+            except Exception:
+                pass
+    print("🚀 API iniciada - Archivos temporales limpiados")
 
 if __name__ == "__main__":
-    # Verificar dependencias
-    try:
-        import PyPDF2
-        import reportlab
-    except ImportError as e:
-        print("❌ Error: Faltan dependencias requeridas")
-        print("💡 Instala las dependencias con:")
-        print("   pip install PyPDF2 reportlab")
-        sys.exit(1)
+    import uvicorn
+    print("🖼️  Iniciando API REST para campos de imagen en PDF")
+    print("📡 Documentación disponible en: http://localhost:8000/docs")
+    print("🔗 API disponible en: http://localhost:8000")
     
-    main()
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        reload=True
+    )
